@@ -1,0 +1,91 @@
+======================================================================
+PDF STRUCTURED EXTRACTION API - FINAL VERIFICATION
+Server: http://localhost:8011
+======================================================================
+Server: RUNNING
+
+=== URL-Based Tests (using preloaded samples) ===
+
+--- Test: List Samples ---
+  URL: http://localhost:8011/api/v1/samples
+  HTTP Status: 200
+  Result: PASSED
+
+--- Test: Metadata (Sample1 single column) ---
+  URL: http://localhost:8011/api/v1/samples/sample1_single_column.pdf/extract/metadata
+  HTTP Status: 200
+  Data: pages=2, has_title=True, encrypted=False
+  Result: PASSED
+
+--- Test: Text Page 1 (Sample1) ---
+  URL: http://localhost:8011/api/v1/samples/sample1_single_column.pdf/extract/text
+  HTTP Status: 200
+  Data: text_len=1101
+  Result: PASSED
+
+--- Test: Layout & Multi-column (Sample2) ---
+  URL: http://localhost:8011/api/v1/samples/sample2_multi_column.pdf/extract/layout
+  HTTP Status: 200
+  Data: columns=2, fragments=361
+  Result: PASSED
+
+--- Test: Table Recognition (Sample3) ---
+  URL: http://localhost:8011/api/v1/samples/sample3_tables.pdf/extract/tables
+  HTTP Status: 200
+  Data: tables=1, first_table=4x8
+  Result: PASSED
+
+--- Test: TOC Extraction (Sample4) ---
+  URL: http://localhost:8011/api/v1/samples/sample4_toc.pdf/extract/toc
+  HTTP Status: 200
+  Data: toc_entries=7, first_title=第1章 引言
+  Result: PASSED
+
+--- Test: Metadata (Sample5 scanned) ---
+  URL: http://localhost:8011/api/v1/samples/sample5_scanned.pdf/extract/metadata
+  HTTP Status: 200
+  Data: pages=3, has_title=True, encrypted=False
+  Result: PASSED
+
+=== File Upload Tests ===
+
+--- Test: Upload - Metadata ---
+  URL: http://localhost:8011/api/v1/extract/metadata
+  HTTP Status: 200
+  Data: pages=2, has_title=True, encrypted=False
+  Result: PASSED
+
+--- Test: Upload - Full Text ---
+  URL: http://localhost:8011/api/v1/extract/text
+  HTTP Status: 200
+  Data: full_text_len=1623, total_pages=1
+  Result: PASSED
+
+--- Test: Upload - Layout ---
+  URL: http://localhost:8011/api/v1/extract/layout
+  HTTP Status: 200
+  Data: columns=2, fragments=361
+  Result: PASSED
+
+--- Test: Upload - Tables ---
+  URL: http://localhost:8011/api/v1/extract/tables
+  HTTP Status: 200
+  Data: tables=1, first_table=4x8
+  Result: PASSED
+
+--- Test: Upload - TOC ---
+  URL: http://localhost:8011/api/v1/extract/toc
+  HTTP Status: 200
+  Data: toc_entries=7, first_title=第1章 引言
+  Result: PASSED
+
+--- Test: Upload - Complete Extraction ---
+  URL: http://localhost:8011/api/v1/extract/all
+  HTTP Status: 200
+  Result: FAILED - 0
+
+======================================================================
+SUMMARY: 12/13 tests passed, 1 failed
+======================================================================
+
+1 tests failed. Check above for details.
