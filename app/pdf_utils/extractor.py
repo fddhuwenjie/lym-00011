@@ -19,12 +19,13 @@ class TextFragment:
     y0: float
     x1: float
     y1: float
-    font_name: str
-    font_size: float
-    is_bold: bool
-    is_italic: bool
+    font_name: str = ""
+    font_size: float = 0.0
+    is_bold: bool = False
+    is_italic: bool = False
     column: Optional[int] = None
     is_span_column: bool = False
+    line_id: Optional[int] = None
 
 
 @dataclass
@@ -348,6 +349,23 @@ class PDFExtractor:
         if not fragments:
             return []
         
+        has_line_ids = all(f.line_id is not None for f in fragments)
+        
+        if has_line_ids:
+            line_groups: Dict[int, List[TextFragment]] = {}
+            for frag in fragments:
+                lid = frag.line_id
+                if lid not in line_groups:
+                    line_groups[lid] = []
+                line_groups[lid].append(frag)
+            
+            lines = []
+            for lid in sorted(line_groups.keys()):
+                lines.append(Line(line_groups[lid]))
+            
+            lines.sort(key=lambda l: l.y0)
+            return lines
+        
         line_height = self._estimate_line_height(fragments)
         tolerance = line_height * 0.4
         
@@ -355,33 +373,22 @@ class PDFExtractor:
         
         lines = []
         current_line_frags = []
-        current_y_min = None
-        current_y_max = None
+        current_y_center = None
         
         for frag in sorted_frags:
-            frag_y_min = frag.y0
-            frag_y_max = frag.y1
-            frag_center = (frag_y_min + frag_y_max) / 2
+            frag_y_center = (frag.y0 + frag.y1) / 2
             
-            if current_y_min is None:
-                current_y_min = frag_y_min
-                current_y_max = frag_y_max
+            if current_y_center is None:
+                current_y_center = frag_y_center
                 current_line_frags = [frag]
             else:
-                overlap = min(current_y_max, frag_y_max) - max(current_y_min, frag_y_min)
-                current_center = (current_y_min + current_y_max) / 2
-                total_height = max(current_y_max, frag_y_max) - min(current_y_min, frag_y_min)
-                avg_height = ((current_y_max - current_y_min) + (frag_y_max - frag_y_min)) / 2
-                
-                if overlap > avg_height * 0.3 or abs(frag_center - current_center) <= tolerance:
+                if abs(frag_y_center - current_y_center) <= tolerance:
                     current_line_frags.append(frag)
-                    current_y_min = min(current_y_min, frag_y_min)
-                    current_y_max = max(current_y_max, frag_y_max)
+                    current_y_center = (current_y_center + frag_y_center) / 2
                 else:
                     if current_line_frags:
                         lines.append(Line(current_line_frags))
-                    current_y_min = frag_y_min
-                    current_y_max = frag_y_max
+                    current_y_center = frag_y_center
                     current_line_frags = [frag]
         
         if current_line_frags:
@@ -599,65 +606,49 @@ class PDFExtractor:
         has_columns = any(f.column is not None and f.column > 0 for f in fragments)
         
         if has_columns:
-            max_col = max(f.column for f in fragments if f.column is not None)
+            line_groups: Dict[int, List[TextFragment]] = {}
             
-            line_height = self._estimate_line_height(fragments)
-            line_tolerance = line_height * 0.3
+            for f in fragments:
+                key = f.line_id if f.line_id is not None else int(round(f.y0 / 2))
+                if key not in line_groups:
+                    line_groups[key] = []
+                line_groups[key].append(f)
             
-            span_frags = [f for f in fragments if f.is_span_column]
-            col_frags = [f for f in fragments if not f.is_span_column]
+            sorted_line_keys = sorted(line_groups.keys())
             
-            span_frags.sort(key=lambda f: f.y0)
-            
-            span_regions = []
-            for sf in span_frags:
-                span_regions.append((sf.y0, sf.y1))
-            
-            def get_span_region(y):
-                for i, (s_y0, s_y1) in enumerate(span_regions):
-                    if y >= s_y0 - line_tolerance and y <= s_y1 + line_tolerance:
-                        return i, s_y0, s_y1
-                return -1, -1, -1
-            
-            sorted_frags = []
-            processed_span_indices = set()
-            
-            all_frags_with_key = []
-            for f in col_frags:
-                span_idx, s_y0, s_y1 = get_span_region(f.y0)
-                if span_idx >= 0:
-                    key = (span_idx, f.column, f.y0, f.x0)
-                else:
-                    insert_before = len(span_regions)
-                    for i, (s_y0, s_y1) in enumerate(span_regions):
-                        if f.y1 < s_y0:
-                            insert_before = i
-                            break
-                    key = (insert_before, f.column, f.y0, f.x0)
-                all_frags_with_key.append((key, f))
-            
-            all_frags_with_key.sort(key=lambda x: x[0])
-            
-            current_span_insert_idx = 0
-            for key, f in all_frags_with_key:
-                block_idx = key[0]
+            result = []
+            for key in sorted_line_keys:
+                line_frags = line_groups[key]
                 
-                while current_span_insert_idx < len(span_frags) and current_span_insert_idx <= block_idx:
-                    sf = span_frags[current_span_insert_idx]
-                    sorted_frags.append(sf)
-                    current_span_insert_idx += 1
+                span_in_line = [f for f in line_frags if f.is_span_column]
+                col_in_line = [f for f in line_frags if not f.is_span_column]
                 
-                sorted_frags.append(f)
+                span_in_line.sort(key=lambda f: f.x0)
+                col_in_line.sort(key=lambda f: (f.column if f.column is not None else 0, f.x0))
+                
+                result.extend(span_in_line)
+                result.extend(col_in_line)
             
-            while current_span_insert_idx < len(span_frags):
-                sorted_frags.append(span_frags[current_span_insert_idx])
-                current_span_insert_idx += 1
-            
-            return sorted_frags
+            return result
         else:
+            line_groups: Dict[int, List[TextFragment]] = {}
             line_height = self._estimate_line_height(fragments)
-            fragments.sort(key=lambda f: (round(f.y0 / (line_height * 0.5)) * line_height, f.x0))
-            return fragments
+            
+            for f in fragments:
+                key = f.line_id if f.line_id is not None else int(round(f.y0 / line_height * 2))
+                if key not in line_groups:
+                    line_groups[key] = []
+                line_groups[key].append(f)
+            
+            sorted_line_keys = sorted(line_groups.keys())
+            
+            result = []
+            for key in sorted_line_keys:
+                line_frags = line_groups[key]
+                line_frags.sort(key=lambda f: f.x0)
+                result.extend(line_frags)
+            
+            return result
 
     def extract_layout(self, page_num: Optional[int] = None) -> Dict[str, Any]:
         if page_num is not None:
@@ -696,60 +687,63 @@ class PDFExtractor:
         fragments = []
         
         try:
-            plumber_page = self._plumber_doc.pages[page_num]
-            words = plumber_page.extract_words(
-                keep_blank_chars=False,
-                use_text_flow=True,
-                extra_attrs=["fontname", "size"]
-            )
-            
-            for word in words:
-                font_name = word.get("fontname", "")
-                text = word.get("text", "").strip()
-                if not text:
-                    continue
-                    
-                fragments.append(TextFragment(
-                    text=text,
-                    page=page_num,
-                    x0=float(word.get("x0", 0)),
-                    y0=float(word.get("top", 0)),
-                    x1=float(word.get("x1", 0)),
-                    y1=float(word.get("bottom", 0)),
-                    font_name=font_name,
-                    font_size=float(word.get("size", 0)),
-                    is_bold=bool("Bold" in font_name or "bold" in font_name or "BD" in font_name or "Hei" in font_name),
-                    is_italic=bool("Italic" in font_name or "italic" in font_name or "IT" in font_name or "Oblique" in font_name)
-                ))
+            fitz_page = self._fitz_doc[page_num]
+            text_dict = fitz_page.get_text("dict")
+            line_counter = 0
+            for block in text_dict.get("blocks", []):
+                if block.get("type") == 0:
+                    for line in block.get("lines", []):
+                        for span in line.get("spans", []):
+                            bbox = span.get("bbox", [0, 0, 0, 0])
+                            font_name = span.get("font", "")
+                            text = span.get("text", "").strip()
+                            if not text:
+                                continue
+                                
+                            fragments.append(TextFragment(
+                                text=text,
+                                page=page_num,
+                                x0=float(bbox[0]),
+                                y0=float(bbox[1]),
+                                x1=float(bbox[2]),
+                                y1=float(bbox[3]),
+                                font_name=font_name,
+                                font_size=float(span.get("size", 0)),
+                                is_bold=bool(span.get("flags", 0) & 1 << 5 or "Bold" in font_name or "bold" in font_name or "Hei" in font_name),
+                                is_italic=bool(span.get("flags", 0) & 1 << 6 or "Italic" in font_name or "italic" in font_name),
+                                line_id=line_counter
+                            ))
+                        line_counter += 1
         except Exception as e:
             pass
         
         if not fragments:
             try:
-                fitz_page = self._fitz_doc[page_num]
-                text_dict = fitz_page.get_text("dict")
-                for block in text_dict.get("blocks", []):
-                    if block.get("type") == 0:
-                        for line in block.get("lines", []):
-                            for span in line.get("spans", []):
-                                bbox = span.get("bbox", [0, 0, 0, 0])
-                                font_name = span.get("font", "")
-                                text = span.get("text", "").strip()
-                                if not text:
-                                    continue
-                                    
-                                fragments.append(TextFragment(
-                                    text=text,
-                                    page=page_num,
-                                    x0=float(bbox[0]),
-                                    y0=float(bbox[1]),
-                                    x1=float(bbox[2]),
-                                    y1=float(bbox[3]),
-                                    font_name=font_name,
-                                    font_size=float(span.get("size", 0)),
-                                    is_bold=bool(span.get("flags", 0) & 1 << 5 or "Bold" in font_name or "bold" in font_name or "Hei" in font_name),
-                                    is_italic=bool(span.get("flags", 0) & 1 << 6 or "Italic" in font_name or "italic" in font_name)
-                                ))
+                plumber_page = self._plumber_doc.pages[page_num]
+                words = plumber_page.extract_words(
+                    keep_blank_chars=False,
+                    use_text_flow=True,
+                    extra_attrs=["fontname", "size"]
+                )
+                
+                for word in words:
+                    font_name = word.get("fontname", "")
+                    text = word.get("text", "").strip()
+                    if not text:
+                        continue
+                        
+                    fragments.append(TextFragment(
+                        text=text,
+                        page=page_num,
+                        x0=float(word.get("x0", 0)),
+                        y0=float(word.get("top", 0)),
+                        x1=float(word.get("x1", 0)),
+                        y1=float(word.get("bottom", 0)),
+                        font_name=font_name,
+                        font_size=float(word.get("size", 0)),
+                        is_bold=bool("Bold" in font_name or "bold" in font_name or "BD" in font_name or "Hei" in font_name),
+                        is_italic=bool("Italic" in font_name or "italic" in font_name or "IT" in font_name or "Oblique" in font_name)
+                    ))
             except Exception as e:
                 pass
         
@@ -787,22 +781,28 @@ class PDFExtractor:
                 )
                 
                 for idx, ct in enumerate(camelot_tables):
-                    if ct.df.empty or ct.df.shape[0] < 3:
-                        continue
-                    
-                    min_accuracy = 80 if flavor == "stream" else 70
-                    if ct.accuracy < min_accuracy:
+                    if ct.df.empty:
                         continue
                     
                     data = ct.df.values.tolist()
                     rows, cols = len(data), len(data[0]) if data else 0
                     
-                    if cols < 3 or rows < 3:
-                        continue
+                    if flavor == "lattice":
+                        if ct.accuracy < 40:
+                            continue
+                        if rows < 2 or cols < 2:
+                            continue
+                        non_empty_ratio = 0.2
+                    else:
+                        if ct.accuracy < 90:
+                            continue
+                        if rows < 4 or cols < 3:
+                            continue
+                        non_empty_ratio = 0.6
                     
                     non_empty_cells = sum(1 for row in data for cell in row if str(cell).strip())
                     total_cells = rows * cols
-                    if total_cells > 0 and non_empty_cells / total_cells < 0.5:
+                    if total_cells > 0 and non_empty_cells / total_cells < non_empty_ratio:
                         continue
                     
                     has_header_markers = False
@@ -821,10 +821,81 @@ class PDFExtractor:
                             if len(col_widths) >= 2:
                                 avg_width = sum(col_widths) / len(col_widths)
                                 width_variance = sum((w - avg_width)**2 for w in col_widths) / len(col_widths)
-                                if width_variance < 25:
+                                if width_variance < 30:
                                     continue
                         except:
                             continue
+                    
+                    has_vertical_separators = False
+                    is_likely_toc = False
+                    
+                    if rows > 1 and cols > 1:
+                        all_col_widths = []
+                        for col in range(cols):
+                            col_texts = [len(str(data[r][col])) for r in range(rows) if str(data[r][col]).strip()]
+                            if col_texts:
+                                all_col_widths.append(sum(col_texts) / len(col_texts))
+                        
+                        if len(all_col_widths) >= 2:
+                            max_width = max(all_col_widths)
+                            min_width = min(all_col_widths)
+                            if max_width > 0 and max_width / min_width > 1.5:
+                                has_vertical_separators = True
+                    
+                    if flavor == "stream":
+                        first_col_texts = [str(data[r][0]).strip() for r in range(rows) if r < len(data)]
+                        last_col_texts = [str(data[r][-1]).strip() for r in range(rows) if r < len(data)]
+                        
+                        toc_number_pattern = 0
+                        for t in first_col_texts:
+                            if re.match(r'^[\d\.]+$', t):
+                                toc_number_pattern += 1
+                            elif re.match(r'^第[一二三四五六七八九十百千\d]+[章节篇部分]', t):
+                                toc_number_pattern += 1
+                            elif re.match(r'^[\d\.]+[\s、．]+', t):
+                                toc_number_pattern += 1
+                        
+                        numeric_last_col = sum(1 for t in last_col_texts if t.isdigit() and 1 <= int(t) <= 500)
+                        
+                        if toc_number_pattern >= rows * 0.4 or numeric_last_col >= rows * 0.4:
+                            is_likely_toc = True
+                        
+                        if not is_likely_toc:
+                            has_dots = 0
+                            for row in data:
+                                row_text = " ".join(str(c) for c in row if str(c).strip())
+                                if re.search(r'[.．·]{2,}', row_text):
+                                    has_dots += 1
+                            
+                            if has_dots >= rows * 0.3:
+                                is_likely_toc = True
+                        
+                        if not is_likely_toc:
+                            avg_cell_length = 0
+                            total_cells = 0
+                            for row in data:
+                                for cell in row:
+                                    cell_text = str(cell).strip()
+                                    if cell_text:
+                                        avg_cell_length += len(cell_text)
+                                        total_cells += 1
+                            if total_cells > 0:
+                                avg_cell_length /= total_cells
+                            
+                            short_cell_ratio = 0
+                            for row in data:
+                                for cell in row:
+                                    cell_text = str(cell).strip()
+                                    if cell_text and len(cell_text) <= 4:
+                                        short_cell_ratio += 1
+                            if total_cells > 0:
+                                short_cell_ratio /= total_cells
+                            
+                            if short_cell_ratio > 0.6 and avg_cell_length < 8:
+                                is_likely_toc = True
+                    
+                    if flavor == "stream" and ((not has_header_markers and not has_vertical_separators) or is_likely_toc):
+                        continue
                     
                     cells = []
                     for r in range(rows):
@@ -860,10 +931,89 @@ class PDFExtractor:
         
         if tables:
             tables = self._deduplicate_tables(tables)
+            tables = self._split_merged_tables(tables)
             tables = self._merge_overlapping_tables(tables)
             return tables
         
         return self._fallback_table_detection(page_num)
+    
+    def _split_merged_tables(self, tables: List[Table]) -> List[Table]:
+        if not tables:
+            return tables
+        
+        split_tables = []
+        
+        for table in tables:
+            if table.rows < 4:
+                split_tables.append(table)
+                continue
+            
+            row_heights = []
+            for r in range(table.rows - 1):
+                y0_curr = min(cell.y0 for row in table.cells[r:r+1] for cell in row if cell)
+                y1_next = max(cell.y1 for row in table.cells[r+1:r+2] for cell in row if cell)
+                if y0_curr and y1_next:
+                    row_heights.append(y1_next - y0_curr)
+            
+            if not row_heights:
+                split_tables.append(table)
+                continue
+            
+            avg_height = sum(row_heights) / len(row_heights)
+            
+            split_points = []
+            for r in range(len(row_heights)):
+                if row_heights[r] > avg_height * 1.8 and row_heights[r] > 10:
+                    split_points.append(r + 1)
+            
+            if not split_points:
+                split_tables.append(table)
+                continue
+            
+            prev_split = 0
+            for split_point in split_points:
+                if split_point - prev_split >= 2:
+                    new_rows = split_point - prev_split
+                    new_data = table.data[prev_split:split_point]
+                    new_cells = table.cells[prev_split:split_point]
+                    
+                    new_y0 = min(cell.y0 for row in new_cells for cell in row if cell)
+                    new_y1 = max(cell.y1 for row in new_cells for cell in row if cell)
+                    
+                    split_tables.append(Table(
+                        page=table.page,
+                        rows=new_rows,
+                        cols=table.cols,
+                        data=new_data,
+                        cells=new_cells,
+                        x0=table.x0,
+                        y0=new_y0,
+                        x1=table.x1,
+                        y1=new_y1
+                    ))
+                prev_split = split_point
+            
+            if table.rows - prev_split >= 2:
+                new_rows = table.rows - prev_split
+                new_data = table.data[prev_split:]
+                new_cells = table.cells[prev_split:]
+                
+                new_y0 = min(cell.y0 for row in new_cells for cell in row if cell)
+                new_y1 = max(cell.y1 for row in new_cells for cell in row if cell)
+                
+                split_tables.append(Table(
+                    page=table.page,
+                    rows=new_rows,
+                    cols=table.cols,
+                    data=new_data,
+                    cells=new_cells,
+                    x0=table.x0,
+                    y0=new_y0,
+                    x1=table.x1,
+                    y1=new_y1
+                ))
+        
+        return split_tables
     
     def _deduplicate_tables(self, tables: List[Table]) -> List[Table]:
         if len(tables) < 2:
@@ -960,41 +1110,43 @@ class PDFExtractor:
         page_height = self._fitz_doc[page_num].rect.height
         page_width = self._fitz_doc[page_num].rect.width
         
-        fragments.sort(key=lambda f: (f.y0, f.x0))
+        line_groups: Dict[int, List[TextFragment]] = {}
+        for f in fragments:
+            key = f.line_id if f.line_id is not None else int(round(f.y0 / 2))
+            if key not in line_groups:
+                line_groups[key] = []
+            line_groups[key].append(f)
         
         line_height = self._estimate_line_height(fragments)
         
-        y_coords = sorted(list(set([round(f.y0 / (line_height * 0.5)) * line_height for f in fragments])))
-        
         potential_rows = []
-        for y in y_coords:
-            row_frags = [f for f in fragments if abs(f.y0 - y) < line_height * 0.4]
-            if len(row_frags) >= 3:
+        for line_id in sorted(line_groups.keys()):
+            row_frags = line_groups[line_id]
+            if len(row_frags) >= 2:
                 x_centers = sorted([(f.x0 + f.x1) / 2 for f in row_frags])
                 gaps = [x_centers[i+1] - x_centers[i] for i in range(len(x_centers)-1)]
                 
-                if len(gaps) >= 2 and all(g > 15 for g in gaps):
+                if len(gaps) >= 1 and all(g > 10 for g in gaps):
                     avg_gap = sum(gaps) / len(gaps)
                     gap_variance = sum((g - avg_gap) ** 2 for g in gaps) / len(gaps)
                     
-                    if gap_variance < avg_gap * avg_gap * 0.5:
+                    if gap_variance < avg_gap * avg_gap * 0.8:
                         x0 = min(f.x0 for f in row_frags)
                         x1 = max(f.x1 for f in row_frags)
-                        potential_rows.append((y, row_frags, x0, x1))
+                        y0 = min(f.y0 for f in row_frags)
+                        y1 = max(f.y1 for f in row_frags)
+                        potential_rows.append((y0, y1, row_frags, x0, x1))
         
-        if len(potential_rows) < 3:
+        if len(potential_rows) < 2:
             return []
         
         table_groups = []
         current_group = [potential_rows[0]]
         
         for i in range(1, len(potential_rows)):
-            prev_y = potential_rows[i-1][0]
-            curr_y = potential_rows[i][0]
-            gap = curr_y - prev_y
-            
-            prev_x0, prev_x1 = potential_rows[i-1][2], potential_rows[i-1][3]
-            curr_x0, curr_x1 = potential_rows[i][2], potential_rows[i][3]
+            prev_y0, prev_y1, _, prev_x0, prev_x1 = potential_rows[i-1]
+            curr_y0, curr_y1, _, curr_x0, curr_x1 = potential_rows[i]
+            gap = curr_y0 - prev_y1
             
             prev_width = prev_x1 - prev_x0
             curr_width = curr_x1 - curr_x0
@@ -1002,19 +1154,19 @@ class PDFExtractor:
             horizontal_overlap = min(prev_x1, curr_x1) - max(prev_x0, curr_x0)
             
             avg_width = (prev_width + curr_width) / 2
-            table_like_width = avg_width > page_width * 0.3
+            table_like_width = avg_width > page_width * 0.25
             
-            if (gap < line_height * 2.5 and gap > 0 and 
-                width_ratio > 0.6 and 
-                horizontal_overlap > avg_width * 0.5 and
+            if (gap < line_height * 3 and gap > -line_height * 0.5 and 
+                width_ratio > 0.5 and 
+                horizontal_overlap > avg_width * 0.4 and
                 table_like_width):
                 current_group.append(potential_rows[i])
             else:
-                if len(current_group) >= 3:
+                if len(current_group) >= 2:
                     table_groups.append(current_group)
                 current_group = [potential_rows[i]]
         
-        if len(current_group) >= 3:
+        if len(current_group) >= 2:
             table_groups.append(current_group)
         
         if not table_groups:
@@ -1023,13 +1175,13 @@ class PDFExtractor:
         tables = []
         
         for group in table_groups:
-            cols_count = max(len(r[1]) for r in group)
+            cols_count = max(len(r[2]) for r in group)
             
-            if cols_count < 3:
+            if cols_count < 2:
                 continue
             
             col_alignments = []
-            for r_idx, (y, row_frags, x0, x1) in enumerate(group):
+            for r_idx, (y0, y1, row_frags, x0, x1) in enumerate(group):
                 sorted_frags = sorted(row_frags, key=lambda f: f.x0)
                 for c_idx, frag in enumerate(sorted_frags):
                     if c_idx >= len(col_alignments):
@@ -1040,38 +1192,38 @@ class PDFExtractor:
             for col_xs in col_alignments:
                 if len(col_xs) >= 2:
                     variance = sum((x - sum(col_xs)/len(col_xs))**2 for x in col_xs) / len(col_xs)
-                    if variance < 200:
+                    if variance < 500:
                         valid_cols += 1
             
             if valid_cols < 2:
                 continue
             
             rows_data = []
-            for y, row_frags, x0, x1 in group:
+            for y0, y1, row_frags, x0, x1 in group:
                 sorted_frags = sorted(row_frags, key=lambda f: f.x0)
                 row_data = [""] * cols_count
                 for c_idx, frag in enumerate(sorted_frags[:cols_count]):
                     row_data[c_idx] = frag.text
-                rows_data.append((y, row_data, sorted_frags))
+                rows_data.append((y0, y1, row_data, sorted_frags))
             
-            if len(rows_data) < 3:
+            if len(rows_data) < 2:
                 continue
             
             rows = len(rows_data)
             cols = cols_count
-            data = [[row_data for _, row_data, _ in rows_data][r] for r in range(rows)]
+            data = [[row_data for _, _, row_data, _ in rows_data][r] for r in range(rows)]
             cells = [[None for _ in range(cols)] for _ in range(rows)]
             
-            for r_idx, (y, row_data, frags) in enumerate(rows_data):
+            for r_idx, (y0, y1, row_data, frags) in enumerate(rows_data):
                 for c_idx, frag in enumerate(frags[:cols]):
                     cells[r_idx][c_idx] = TableCell(
                         text=frag.text,
                         row=r_idx,
                         col=c_idx,
                         x0=frag.x0,
-                        y0=page_height - frag.y1,
+                        y0=frag.y0,
                         x1=frag.x1,
-                        y1=page_height - frag.y0
+                        y1=frag.y1
                     )
             
             valid_cells = [c for row in cells for c in row if c is not None]
