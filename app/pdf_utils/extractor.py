@@ -205,41 +205,57 @@ class PDFExtractor:
                 return fragments
                 
             except ImportError:
-                doc = fitz.open("pdf", self.pdf_bytes)
-                page = doc[page_num]
+                print("提示: 未安装 pytesseract，将使用 PyMuPDF OCR 作为备选")
+                print("  如需更好的中英文OCR效果，请安装:")
+                print("  1. pip install pytesseract")
+                print("  2. 安装 Tesseract OCR 引擎 (https://github.com/UB-Mannheim/tesseract/wiki)")
+                print("  3. 安装中文语言包 (chi_sim)")
+                
                 try:
-                    textpage = page.get_textpage_ocr(flags=0, dpi=300, full=True)
-                except:
+                    doc = fitz.open("pdf", self.pdf_bytes)
+                    page = doc[page_num]
+                    try:
+                        textpage = page.get_textpage_ocr(flags=0, dpi=300, full=True)
+                    except Exception as e:
+                        print(f"PyMuPDF OCR 不可用: {e}")
+                        print("提示: PyMuPDF OCR 需要完整版本的 PyMuPDF")
+                        doc.close()
+                        return []
+                    
+                    text_dict = textpage.extractDICT()
+                    doc.close()
+                    
+                    fragments = []
+                    for block in text_dict.get("blocks", []):
+                        if block.get("type") == 0:
+                            for line in block.get("lines", []):
+                                for span in line.get("spans", []):
+                                    bbox = span.get("bbox", [0, 0, 0, 0])
+                                    text = span.get("text", "").strip()
+                                    if text:
+                                        fragments.append(TextFragment(
+                                            text=text,
+                                            page=page_num,
+                                            x0=float(bbox[0]),
+                                            y0=float(bbox[1]),
+                                            x1=float(bbox[2]),
+                                            y1=float(bbox[3]),
+                                            font_name="OCR",
+                                            font_size=float(span.get("size", 12)),
+                                            is_bold=False,
+                                            is_italic=False
+                                        ))
+                    
+                    return fragments
+                except Exception as e:
+                    print(f"PyMuPDF OCR 处理失败: {e}")
                     return []
                 
-                text_dict = textpage.extractDICT()
-                doc.close()
-                
-                fragments = []
-                for block in text_dict.get("blocks", []):
-                    if block.get("type") == 0:
-                        for line in block.get("lines", []):
-                            for span in line.get("spans", []):
-                                bbox = span.get("bbox", [0, 0, 0, 0])
-                                text = span.get("text", "").strip()
-                                if text:
-                                    fragments.append(TextFragment(
-                                        text=text,
-                                        page=page_num,
-                                        x0=float(bbox[0]),
-                                        y0=float(bbox[1]),
-                                        x1=float(bbox[2]),
-                                        y1=float(bbox[3]),
-                                        font_name="OCR",
-                                        font_size=float(span.get("size", 12)),
-                                        is_bold=False,
-                                        is_italic=False
-                                    ))
-                
-                return fragments
-                
         except Exception as e:
-            print(f"OCR error: {e}")
+            print(f"OCR 处理错误: {e}")
+            print("提示: 请确保已安装:")
+            print("  - pdf2image 依赖 poppler: https://github.com/oschwartz10612/poppler-windows/releases")
+            print("  - opencv-python: 已在 requirements.txt 中")
             return []
 
     def get_metadata(self) -> PDFMetadata:
@@ -333,36 +349,40 @@ class PDFExtractor:
             return []
         
         line_height = self._estimate_line_height(fragments)
-        tolerance = line_height * 0.5
+        tolerance = line_height * 0.4
         
-        font_sizes = [f.font_size for f in fragments if f.font_size > 0]
-        max_font_size = max(font_sizes) if font_sizes else 12
-        
-        sorted_frags = sorted(fragments, key=lambda f: (round(f.y0 / (line_height * 0.3)), f.x0))
+        sorted_frags = sorted(fragments, key=lambda f: (f.y0, f.x0))
         
         lines = []
         current_line_frags = []
-        current_y = None
+        current_y_min = None
+        current_y_max = None
         
         for frag in sorted_frags:
-            frag_y = (frag.y0 + frag.y1) / 2
-            frag_height = frag.y1 - frag.y0
+            frag_y_min = frag.y0
+            frag_y_max = frag.y1
+            frag_center = (frag_y_min + frag_y_max) / 2
             
-            adaptive_tolerance = tolerance
-            if frag.font_size > max_font_size * 0.7:
-                adaptive_tolerance = max(tolerance, frag_height * 0.5)
-            
-            if current_y is None:
-                current_y = frag_y
+            if current_y_min is None:
+                current_y_min = frag_y_min
+                current_y_max = frag_y_max
                 current_line_frags = [frag]
-            elif abs(frag_y - current_y) <= adaptive_tolerance:
-                current_line_frags.append(frag)
-                current_y = (current_y + frag_y) / 2
             else:
-                if current_line_frags:
-                    lines.append(Line(current_line_frags))
-                current_y = frag_y
-                current_line_frags = [frag]
+                overlap = min(current_y_max, frag_y_max) - max(current_y_min, frag_y_min)
+                current_center = (current_y_min + current_y_max) / 2
+                total_height = max(current_y_max, frag_y_max) - min(current_y_min, frag_y_min)
+                avg_height = ((current_y_max - current_y_min) + (frag_y_max - frag_y_min)) / 2
+                
+                if overlap > avg_height * 0.3 or abs(frag_center - current_center) <= tolerance:
+                    current_line_frags.append(frag)
+                    current_y_min = min(current_y_min, frag_y_min)
+                    current_y_max = max(current_y_max, frag_y_max)
+                else:
+                    if current_line_frags:
+                        lines.append(Line(current_line_frags))
+                    current_y_min = frag_y_min
+                    current_y_max = frag_y_max
+                    current_line_frags = [frag]
         
         if current_line_frags:
             lines.append(Line(current_line_frags))
@@ -391,7 +411,7 @@ class PDFExtractor:
         
         font_sizes = [f.font_size for f in fragments if f.font_size > 0]
         max_font_size = max(font_sizes) if font_sizes else 12
-        large_font_threshold = max(max_font_size * 0.7, 14)
+        large_font_threshold = max(max_font_size * 0.5, 12)
         
         body_lines = []
         span_lines = []
@@ -401,7 +421,7 @@ class PDFExtractor:
             is_large_font = line.font_size >= large_font_threshold
             has_large_fragment = any(f.font_size >= large_font_threshold for f in line.fragments)
             
-            if line_width_ratio > 0.7 or is_large_font or has_large_fragment:
+            if line_width_ratio > 0.75 or is_large_font or has_large_fragment:
                 span_lines.append(line)
                 for f in line.fragments:
                     f.is_span_column = True
@@ -414,7 +434,7 @@ class PDFExtractor:
                 f.is_span_column = True
                 f.column = 0
         
-        if len(body_lines) < 5:
+        if len(body_lines) < 10:
             for f in fragments:
                 if f.column is None:
                     f.column = 0
@@ -422,17 +442,16 @@ class PDFExtractor:
             return fragments
         
         all_x0 = []
-        all_x1 = []
         for line in body_lines:
             for f in line.fragments:
                 all_x0.append(f.x0)
-                all_x1.append(f.x1)
         
-        hist, bin_edges = np.histogram(all_x0, bins=50, range=(0, page_width))
+        hist, bin_edges = np.histogram(all_x0, bins=30, range=(0, page_width))
         
         peaks = []
+        peak_threshold = len(body_lines) * 0.15
         for i in range(1, len(hist) - 1):
-            if hist[i] > hist[i-1] and hist[i] > hist[i+1] and hist[i] > len(body_lines) * 0.1:
+            if hist[i] > hist[i-1] and hist[i] > hist[i+1] and hist[i] > peak_threshold:
                 peaks.append((bin_edges[i] + bin_edges[i+1]) / 2)
         
         peaks.sort()
@@ -442,10 +461,15 @@ class PDFExtractor:
             last_peak = peaks[0]
             column_centers.append(last_peak)
             
+            min_col_gap = page_width * 0.18
             for peak in peaks[1:]:
-                if peak - last_peak > page_width * 0.15:
+                if peak - last_peak > min_col_gap:
                     column_centers.append(peak)
                     last_peak = peak
+            
+            max_columns = 3
+            if len(column_centers) > max_columns:
+                column_centers = column_centers[:max_columns]
             
             if len(column_centers) >= 2:
                 gaps = []
@@ -481,7 +505,7 @@ class PDFExtractor:
         gaps = []
         for i in range(1, len(x_coords)):
             gap = x_coords[i] - x_coords[i-1]
-            if gap > page_width * 0.08:
+            if gap > page_width * 0.1:
                 gaps.append((x_coords[i-1] + gap / 2, gap))
         
         if not gaps:
@@ -577,36 +601,57 @@ class PDFExtractor:
         if has_columns:
             max_col = max(f.column for f in fragments if f.column is not None)
             
+            line_height = self._estimate_line_height(fragments)
+            line_tolerance = line_height * 0.3
+            
             span_frags = [f for f in fragments if f.is_span_column]
             col_frags = [f for f in fragments if not f.is_span_column]
             
             span_frags.sort(key=lambda f: f.y0)
             
+            span_regions = []
+            for sf in span_frags:
+                span_regions.append((sf.y0, sf.y1))
+            
+            def get_span_region(y):
+                for i, (s_y0, s_y1) in enumerate(span_regions):
+                    if y >= s_y0 - line_tolerance and y <= s_y1 + line_tolerance:
+                        return i, s_y0, s_y1
+                return -1, -1, -1
+            
             sorted_frags = []
-            last_span_y = -1
+            processed_span_indices = set()
             
-            for span_frag in span_frags:
-                span_y = span_frag.y0
-                
-                col_content = [f for f in col_frags if f.y0 >= last_span_y and f.y0 < span_y]
-                
-                for col in range(max_col + 1):
-                    col_content_sorted = sorted(
-                        [f for f in col_content if f.column == col],
-                        key=lambda f: (f.y0, f.x0)
-                    )
-                    sorted_frags.extend(col_content_sorted)
-                
-                sorted_frags.append(span_frag)
-                last_span_y = span_y
+            all_frags_with_key = []
+            for f in col_frags:
+                span_idx, s_y0, s_y1 = get_span_region(f.y0)
+                if span_idx >= 0:
+                    key = (span_idx, f.column, f.y0, f.x0)
+                else:
+                    insert_before = len(span_regions)
+                    for i, (s_y0, s_y1) in enumerate(span_regions):
+                        if f.y1 < s_y0:
+                            insert_before = i
+                            break
+                    key = (insert_before, f.column, f.y0, f.x0)
+                all_frags_with_key.append((key, f))
             
-            remaining = [f for f in col_frags if f.y0 >= last_span_y]
-            for col in range(max_col + 1):
-                col_content_sorted = sorted(
-                    [f for f in remaining if f.column == col],
-                    key=lambda f: (f.y0, f.x0)
-                )
-                sorted_frags.extend(col_content_sorted)
+            all_frags_with_key.sort(key=lambda x: x[0])
+            
+            current_span_insert_idx = 0
+            for key, f in all_frags_with_key:
+                block_idx = key[0]
+                
+                while current_span_insert_idx < len(span_frags) and current_span_insert_idx <= block_idx:
+                    sf = span_frags[current_span_insert_idx]
+                    sorted_frags.append(sf)
+                    current_span_insert_idx += 1
+                
+                sorted_frags.append(f)
+            
+            while current_span_insert_idx < len(span_frags):
+                sorted_frags.append(span_frags[current_span_insert_idx])
+                current_span_insert_idx += 1
             
             return sorted_frags
         else:
@@ -742,11 +787,44 @@ class PDFExtractor:
                 )
                 
                 for idx, ct in enumerate(camelot_tables):
-                    if ct.df.empty or ct.df.shape[0] < 2:
+                    if ct.df.empty or ct.df.shape[0] < 3:
+                        continue
+                    
+                    min_accuracy = 80 if flavor == "stream" else 70
+                    if ct.accuracy < min_accuracy:
                         continue
                     
                     data = ct.df.values.tolist()
                     rows, cols = len(data), len(data[0]) if data else 0
+                    
+                    if cols < 3 or rows < 3:
+                        continue
+                    
+                    non_empty_cells = sum(1 for row in data for cell in row if str(cell).strip())
+                    total_cells = rows * cols
+                    if total_cells > 0 and non_empty_cells / total_cells < 0.5:
+                        continue
+                    
+                    has_header_markers = False
+                    if data and data[0]:
+                        first_row_text = " ".join(str(x) for x in data[0] if str(x).strip())
+                        if any(marker in first_row_text for marker in ["序号", "编号", "名称", "日期", "金额", "数量", "备注", "No.", "Date", "Amount", "Qty"]):
+                            has_header_markers = True
+                    
+                    if flavor == "stream" and not has_header_markers:
+                        try:
+                            col_widths = []
+                            for col in ct.df.columns:
+                                col_texts = ct.df[col].astype(str).str.len().values
+                                col_widths.append(float(col_texts.mean()))
+                            
+                            if len(col_widths) >= 2:
+                                avg_width = sum(col_widths) / len(col_widths)
+                                width_variance = sum((w - avg_width)**2 for w in col_widths) / len(col_widths)
+                                if width_variance < 25:
+                                    continue
+                        except:
+                            continue
                     
                     cells = []
                     for r in range(rows):
@@ -781,10 +859,46 @@ class PDFExtractor:
                 continue
         
         if tables:
+            tables = self._deduplicate_tables(tables)
             tables = self._merge_overlapping_tables(tables)
             return tables
         
         return self._fallback_table_detection(page_num)
+    
+    def _deduplicate_tables(self, tables: List[Table]) -> List[Table]:
+        if len(tables) < 2:
+            return tables
+        
+        tables.sort(key=lambda t: (t.y0, t.x0))
+        
+        unique = []
+        seen_areas = []
+        
+        for table in tables:
+            area = (table.x1 - table.x0) * (table.y1 - table.y0)
+            
+            is_dup = False
+            for i, (u_area, u_table) in enumerate(seen_areas):
+                overlap_x = min(table.x1, u_table.x1) - max(table.x0, u_table.x0)
+                overlap_y = min(table.y1, u_table.y1) - max(table.y0, u_table.y0)
+                
+                if overlap_x > 0 and overlap_y > 0:
+                    overlap_area = overlap_x * overlap_y
+                    table_area = (table.x1 - table.x0) * (table.y1 - table.y0)
+                    u_area_calc = (u_table.x1 - u_table.x0) * (u_table.y1 - u_table.y0)
+                    
+                    if overlap_area / min(table_area, u_area_calc) > 0.8:
+                        is_dup = True
+                        if table.rows * table.cols > u_table.rows * u_table.cols:
+                            unique[i] = table
+                            seen_areas[i] = (area, table)
+                        break
+            
+            if not is_dup:
+                unique.append(table)
+                seen_areas.append((area, table))
+        
+        return unique
 
     def _merge_overlapping_tables(self, tables: List[Table]) -> List[Table]:
         if len(tables) < 2:
@@ -798,9 +912,39 @@ class PDFExtractor:
         for next_table in tables[1:]:
             vertical_gap = next_table.y0 - current.y1
             horizontal_overlap = min(current.x1, next_table.x1) - max(current.x0, next_table.x0)
+            min_width = min(current.x1 - current.x0, next_table.x1 - next_table.x0)
             
-            if vertical_gap < 20 and horizontal_overlap > min(current.x1 - current.x0, next_table.x1 - next_table.x0) * 0.5:
-                continue
+            if vertical_gap < 15 and horizontal_overlap > min_width * 0.6:
+                new_rows = current.rows + next_table.rows
+                new_cols = max(current.cols, next_table.cols)
+                new_data = current.data + next_table.data
+                
+                new_cells = current.cells.copy()
+                for row in next_table.cells:
+                    new_row = []
+                    for cell in row:
+                        new_row.append(TableCell(
+                            text=cell.text,
+                            row=cell.row + current.rows,
+                            col=cell.col,
+                            x0=cell.x0,
+                            y0=cell.y0,
+                            x1=cell.x1,
+                            y1=cell.y1
+                        ))
+                    new_cells.append(new_row)
+                
+                current = Table(
+                    page=current.page,
+                    rows=new_rows,
+                    cols=new_cols,
+                    data=new_data,
+                    cells=new_cells,
+                    x0=min(current.x0, next_table.x0),
+                    y0=min(current.y0, next_table.y0),
+                    x1=max(current.x1, next_table.x1),
+                    y1=max(current.y1, next_table.y1)
+                )
             else:
                 merged.append(current)
                 current = next_table
@@ -810,29 +954,35 @@ class PDFExtractor:
 
     def _fallback_table_detection(self, page_num: int) -> List[Table]:
         fragments = self._extract_page_layout(page_num)
-        if len(fragments) < 4:
+        if len(fragments) < 10:
             return []
         
         page_height = self._fitz_doc[page_num].rect.height
+        page_width = self._fitz_doc[page_num].rect.width
         
         fragments.sort(key=lambda f: (f.y0, f.x0))
         
-        y_coords = sorted(list(set([round(f.y0, 1) for f in fragments])))
-        
         line_height = self._estimate_line_height(fragments)
+        
+        y_coords = sorted(list(set([round(f.y0 / (line_height * 0.5)) * line_height for f in fragments])))
         
         potential_rows = []
         for y in y_coords:
-            row_frags = [f for f in fragments if abs(f.y0 - y) < line_height * 0.5]
-            if len(row_frags) >= 2:
+            row_frags = [f for f in fragments if abs(f.y0 - y) < line_height * 0.4]
+            if len(row_frags) >= 3:
                 x_centers = sorted([(f.x0 + f.x1) / 2 for f in row_frags])
                 gaps = [x_centers[i+1] - x_centers[i] for i in range(len(x_centers)-1)]
-                if all(g > 10 for g in gaps):
-                    x0 = min(f.x0 for f in row_frags)
-                    x1 = max(f.x1 for f in row_frags)
-                    potential_rows.append((y, row_frags, x0, x1))
+                
+                if len(gaps) >= 2 and all(g > 15 for g in gaps):
+                    avg_gap = sum(gaps) / len(gaps)
+                    gap_variance = sum((g - avg_gap) ** 2 for g in gaps) / len(gaps)
+                    
+                    if gap_variance < avg_gap * avg_gap * 0.5:
+                        x0 = min(f.x0 for f in row_frags)
+                        x1 = max(f.x1 for f in row_frags)
+                        potential_rows.append((y, row_frags, x0, x1))
         
-        if len(potential_rows) < 2:
+        if len(potential_rows) < 3:
             return []
         
         table_groups = []
@@ -846,17 +996,25 @@ class PDFExtractor:
             prev_x0, prev_x1 = potential_rows[i-1][2], potential_rows[i-1][3]
             curr_x0, curr_x1 = potential_rows[i][2], potential_rows[i][3]
             
-            width_ratio = min(prev_x1 - prev_x0, curr_x1 - curr_x0) / max(prev_x1 - prev_x0, curr_x1 - curr_x0)
-            horizontal_overlap = min(prev_x1, curr_x1) - max(prev_x0, curr_x0) > 0
+            prev_width = prev_x1 - prev_x0
+            curr_width = curr_x1 - curr_x0
+            width_ratio = min(prev_width, curr_width) / max(prev_width, curr_width)
+            horizontal_overlap = min(prev_x1, curr_x1) - max(prev_x0, curr_x0)
             
-            if gap < line_height * 3 and width_ratio > 0.5 and horizontal_overlap:
+            avg_width = (prev_width + curr_width) / 2
+            table_like_width = avg_width > page_width * 0.3
+            
+            if (gap < line_height * 2.5 and gap > 0 and 
+                width_ratio > 0.6 and 
+                horizontal_overlap > avg_width * 0.5 and
+                table_like_width):
                 current_group.append(potential_rows[i])
             else:
-                if len(current_group) >= 2:
+                if len(current_group) >= 3:
                     table_groups.append(current_group)
                 current_group = [potential_rows[i]]
         
-        if len(current_group) >= 2:
+        if len(current_group) >= 3:
             table_groups.append(current_group)
         
         if not table_groups:
@@ -867,7 +1025,25 @@ class PDFExtractor:
         for group in table_groups:
             cols_count = max(len(r[1]) for r in group)
             
-            if cols_count < 2:
+            if cols_count < 3:
+                continue
+            
+            col_alignments = []
+            for r_idx, (y, row_frags, x0, x1) in enumerate(group):
+                sorted_frags = sorted(row_frags, key=lambda f: f.x0)
+                for c_idx, frag in enumerate(sorted_frags):
+                    if c_idx >= len(col_alignments):
+                        col_alignments.append([])
+                    col_alignments[c_idx].append((frag.x0 + frag.x1) / 2)
+            
+            valid_cols = 0
+            for col_xs in col_alignments:
+                if len(col_xs) >= 2:
+                    variance = sum((x - sum(col_xs)/len(col_xs))**2 for x in col_xs) / len(col_xs)
+                    if variance < 200:
+                        valid_cols += 1
+            
+            if valid_cols < 2:
                 continue
             
             rows_data = []
@@ -878,7 +1054,7 @@ class PDFExtractor:
                     row_data[c_idx] = frag.text
                 rows_data.append((y, row_data, sorted_frags))
             
-            if len(rows_data) < 2:
+            if len(rows_data) < 3:
                 continue
             
             rows = len(rows_data)
